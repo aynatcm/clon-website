@@ -1,0 +1,185 @@
+// Phase 2 — Database schema for the Design DNA Platform.
+// PostgreSQL + Prisma. JSON blobs hold validated structures (Zod-checked in app).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ProjectStatus {
+  DRAFT        // created, not yet analyzed
+  CRAWLING     // Phase 3/4 in progress
+  EXTRACTING   // Phase 5 in progress
+  SYNTHESIZING // Phase 5/7 DNA synthesis
+  BUILDING     // Phase 6 design system
+  READY        // DNA + design system available
+  FAILED
+}
+
+enum SourceKind {
+  URL
+  SCREENSHOT
+  CSS
+  HTML
+  ASSET
+  DESIGN_REFERENCE
+  BRAND_GUIDELINE
+}
+
+enum PageOrigin {
+  PLAYWRIGHT
+  FIRECRAWL
+  UPLOAD
+}
+
+enum ShotKind {
+  DESKTOP
+  TABLET
+  MOBILE
+  NAVIGATION
+  FOOTER
+  SECTION
+  COMPONENT
+}
+
+enum GenStatus {
+  REQUESTED
+  ARCHITECTING // Phase 9
+  VALIDATING   // Phase 10
+  GENERATING   // Phase 11
+  READY
+  REJECTED     // below similarity threshold after refinement budget
+  FAILED
+}
+
+model Project {
+  id        String        @id @default(cuid())
+  name      String
+  url       String
+  status    ProjectStatus @default(DRAFT)
+  error     String?
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  sources       Source[]
+  pages         CrawlPage[]
+  screenshots   Screenshot[]
+  designDna     DesignDna?
+  designSystem  DesignSystem?
+  generatedPages GeneratedPage[]
+
+  @@index([status])
+}
+
+// Every input artifact the user provided (Phase 1).
+model Source {
+  id        String     @id @default(cuid())
+  projectId String
+  project   Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  kind      SourceKind
+  // For URL sources: the url. For files: original filename.
+  label     String
+  // R2 object key when the artifact is a stored file.
+  storageKey String?
+  mimeType  String?
+  bytes     Int?
+  // Inline text (small CSS/HTML snippets) when not stored in R2.
+  text      String?
+  createdAt DateTime   @default(now())
+
+  @@index([projectId, kind])
+}
+
+// A page captured during crawl (Phase 3/4).
+model CrawlPage {
+  id        String     @id @default(cuid())
+  projectId String
+  project   Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  origin    PageOrigin
+  url       String
+  title     String?
+  // Raw extracted HTML (truncated/cleaned).
+  html      String?
+  // Markdown content (Firecrawl).
+  markdown  String?
+  // Structured per-page extract: cssVars, fonts, computedSamples,
+  // layoutMetrics, palette, etc. Validated by Zod (PageExtractSchema).
+  extract   Json?
+  createdAt DateTime   @default(now())
+
+  screenshots Screenshot[]
+
+  @@index([projectId])
+}
+
+model Screenshot {
+  id        String     @id @default(cuid())
+  projectId String
+  project   Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  pageId    String?
+  page      CrawlPage? @relation(fields: [pageId], references: [id], onDelete: SetNull)
+  kind      ShotKind
+  // R2 object key.
+  storageKey String
+  width     Int?
+  height    Int?
+  label     String?
+  createdAt DateTime   @default(now())
+
+  @@index([projectId, kind])
+}
+
+// The synthesized Design DNA — the source of truth (Phase 5/7).
+model DesignDna {
+  id        String   @id @default(cuid())
+  projectId String   @unique
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  // Full design-dna.json (DesignDnaSchema). See src/lib/dna/schema.ts.
+  data      Json
+  // 0..1 — how much of the DNA is grounded in observed vs inferred data.
+  confidence Float   @default(0)
+  version   Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Tokens + component/layout libraries + rules derived from the DNA (Phase 6).
+model DesignSystem {
+  id        String   @id @default(cuid())
+  projectId String   @unique
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  // DesignSystemSchema: tokens, components, layouts, rules.
+  data      Json
+  // Self-contained CSS (variables + base + component classes).
+  css       String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// A generated page (Phase 8-11).
+model GeneratedPage {
+  id        String    @id @default(cuid())
+  projectId String
+  project   Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  pageType  String    // about | pricing | landing | careers | contact | custom
+  // Requested sections + brief (GenerationRequestSchema).
+  request   Json
+  // Page architecture (Phase 9, PageArchitectureSchema).
+  architecture Json?
+  // Similarity breakdown + overall score (Phase 10, SimilarityReportSchema).
+  similarity Json?
+  score      Float    @default(0)
+  status     GenStatus @default(REQUESTED)
+  // Final production HTML (Phase 11) — single self-contained file.
+  html       String?
+  error      String?
+  iterations Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([projectId, status])
+}
