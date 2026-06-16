@@ -23,6 +23,12 @@ export const PageArchitectureSchema = z.object({
       subheading: z.string().optional(),
       contentSlots: z.record(z.string(), z.string()).default({}),
       layout: z.string().optional(), // grid-3 | split | stacked | centered
+      // Brand Extension fields (Phase 6.5 → architecture).
+      visualAsset: z.string().optional(), // asset role to place, e.g. "dashboard-shot"
+      visualAssetUrl: z.string().optional(), // resolved real asset URL when available
+      copyPattern: z.string().optional(), // e.g. "product-led"
+      componentPattern: z.string().optional(), // e.g. "pill-cta"
+      sectionPattern: z.string().optional(), // detected section pattern it extends
       notes: z.string().optional(),
     }),
   ),
@@ -46,9 +52,10 @@ export const SimilarityReportSchema = z.object({
   visual: z.number().min(0).max(100),
   brand: z.number().min(0).max(100),
   spacing: z.number().min(0).max(100),
-  // Two-layer scores
+  // Layer scores
   dnaSimilarity: z.number().min(0).max(100),
   visualSimilarity: z.number().min(0).max(100),
+  brandSimilarity: z.number().min(0).max(100).default(0),
   overallSimilarity: z.number().min(0).max(100),
   // back-compat alias of overallSimilarity
   overall: z.number().min(0).max(100),
@@ -62,6 +69,14 @@ export const SimilarityReportSchema = z.object({
       structuralComplete: z.boolean().default(false),
       missing: z.array(z.string()).default([]),
       method: z.enum(["rendered", "skipped"]),
+    })
+    .optional(),
+  brandBreakdown: z
+    .object({
+      voice: z.number().min(0).max(100),
+      content: z.number().min(0).max(100),
+      assetUsage: z.number().min(0).max(100),
+      visualLanguage: z.number().min(0).max(100),
     })
     .optional(),
   passed: z.boolean(),

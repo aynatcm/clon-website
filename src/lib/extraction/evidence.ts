@@ -4,6 +4,8 @@ import type {
   ColorSignal,
   SectionFingerprint,
   ComponentVariant,
+  AssetRef,
+  ContentItem,
 } from "@/lib/crawler/types";
 import type { CssAnalysis } from "./css";
 import { mergeCssAnalyses } from "./css";
@@ -42,6 +44,7 @@ export interface SectionEvidence {
   type: string;
   frequency: number;
   fingerprint: SectionFingerprint; // representative
+  fingerprints: SectionFingerprint[];
   evidence: string[];
 }
 
@@ -74,6 +77,9 @@ export interface Evidence {
   responsive: { mobileColumns: number[]; tabletColumns: number[]; desktopColumns: number[] };
   sectionPaddings: string[];
   contentHints: { headings: string[]; ctas: string[] };
+  // Brand context raw aggregates (Phase 6.5).
+  assets: Array<AssetRef & { page: string }>;
+  content: Array<{ type: ContentItem["type"]; content: string; frequency: number }>;
   screenshots: Array<{ key: string; kind: string; label: string; pageUrl: string }>;
 }
 
@@ -113,6 +119,19 @@ function hue(hex: string): number {
 function hueDistinct(a: string, b: string): boolean {
   const d = Math.abs(hue(a) - hue(b));
   return Math.min(d, 360 - d) > 35;
+}
+
+function cssColorToHex(color?: string): string | undefined {
+  if (!color) return undefined;
+  const c = color.trim().toLowerCase();
+  if (!c || c === "transparent" || c === "rgba(0, 0, 0, 0)") return undefined;
+  if (/^#[0-9a-f]{6}$/i.test(c)) return c;
+  if (/^#[0-9a-f]{3}$/i.test(c)) return `#${c[1]}${c[1]}${c[2]}${c[2]}${c[3]}${c[3]}`.toLowerCase();
+  const m = c.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([0-9.]+))?\)/i);
+  if (!m) return undefined;
+  if (m[4] !== undefined && Number(m[4]) <= 0.05) return undefined;
+  const toHex = (n: string) => Math.max(0, Math.min(255, Number(n))).toString(16).padStart(2, "0");
+  return `#${toHex(m[1])}${toHex(m[2])}${toHex(m[3])}`;
 }
 
 const ROLE_LABEL: Record<string, string> = {
@@ -202,13 +221,20 @@ function inferColorRoles(signals: ColorSignal[], wpColors: string[]): ColorRoles
       .filter((s) => s.role === role)
       .reduce((m, s) => m.set(s.color, (m.get(s.color) ?? 0) + s.area), new Map<string, number>());
   const topByArea = (m: Map<string, number>) => Array.from(m.entries()).sort((a, b) => b[1] - a[1])[0]?.[0];
+  const topByAreaWhere = (m: Map<string, number>, pred: (color: string) => boolean) =>
+    Array.from(m.entries()).filter(([c]) => pred(c)).sort((a, b) => b[1] - a[1])[0]?.[0];
 
   const background = topByArea(byRoleArea("background")) ?? topByArea(byRoleArea("surface"));
-  const surface = topByArea(byRoleArea("surface"));
+  const mode: "light" | "dark" = background ? (luminance(background) < 0.4 ? "dark" : "light") : "light";
+  const surfaceMap = byRoleArea("surface");
+  const surface =
+    (mode === "dark"
+      ? topByAreaWhere(surfaceMap, (c) => luminance(c) < 0.38)
+      : topByAreaWhere(surfaceMap, (c) => luminance(c) > 0.62)) ??
+    topByArea(surfaceMap) ??
+    background;
   const border = topByArea(byRoleArea("border"));
   const text = topByArea(byRoleArea("text"));
-
-  const mode: "light" | "dark" = background ? (luminance(background) < 0.4 ? "dark" : "light") : "light";
 
   const ignored = Array.from(new Set([...wpColors, ...signals.filter((s) => s.wp).map((s) => s.color)])).slice(0, 20);
 
@@ -231,7 +257,7 @@ function topN<T extends { count: number }>(arr: T[], n: number): T[] {
   return [...arr].sort((a, b) => b.count - a.count).slice(0, n);
 }
 
-export function buildEvidence(bundle: CrawlBundle, cssParts: CssAnalysis[]): Evidence {
+export function buildEvidence(bundle: CrawlBundle, cssParts: CssAnalysis[], extraContent: ContentItem[] = []): Evidence {
   const css = mergeCssAnalyses(cssParts);
 
   // --- color: importance-weighted roles ---
@@ -239,6 +265,15 @@ export function buildEvidence(bundle: CrawlBundle, cssParts: CssAnalysis[]): Evi
   const wpColors = new Set<string>();
   for (const p of bundle.pages) {
     allSignals.push(...(p.extract.colorSignals ?? []));
+    const body = p.extract.styleSamples?.find((s) => s.selector === "body");
+    const bodyBg = cssColorToHex(body?.backgroundColor);
+    const bodyText = cssColorToHex(body?.color);
+    const pageArea = Math.max(1, (p.extract.layout.documentWidth || 1440) * (p.extract.layout.documentHeight || 900));
+    if (bodyBg) {
+      allSignals.push({ color: bodyBg, role: "background", weight: 120, area: pageArea, wp: false });
+      allSignals.push({ color: bodyBg, role: "surface", weight: 30, area: pageArea * 0.5, wp: false });
+    }
+    if (bodyText) allSignals.push({ color: bodyText, role: "text", weight: 90, area: pageArea * 0.25, wp: false });
     (p.extract.wpColors ?? []).forEach((c) => wpColors.add(c));
   }
   const colorRoles = inferColorRoles(allSignals, Array.from(wpColors));
@@ -310,21 +345,28 @@ export function buildEvidence(bundle: CrawlBundle, cssParts: CssAnalysis[]): Evi
   }
 
   // --- sections: aggregate fingerprints by type ---
-  const secMap = new Map<string, { count: number; sample: SectionFingerprint; evidence: Set<string> }>();
+  const secMap = new Map<string, { count: number; sample: SectionFingerprint; fingerprints: SectionFingerprint[]; evidence: Set<string> }>();
   for (const p of bundle.pages) {
     for (const f of p.extract.sectionFingerprints ?? []) {
       const e = secMap.get(f.type);
       const ev = `${f.tag}.${f.classes.split(/\s+/)[0] || ""} (${f.columns}col, ${f.headingCount}h/${f.imageCount}img)`;
       if (e) {
         e.count++;
+        e.fingerprints.push(f);
         e.evidence.add(ev);
       } else {
-        secMap.set(f.type, { count: 1, sample: f, evidence: new Set([ev]) });
+        secMap.set(f.type, { count: 1, sample: f, fingerprints: [f], evidence: new Set([ev]) });
       }
     }
   }
   const sections: SectionEvidence[] = Array.from(secMap.entries())
-    .map(([type, v]) => ({ type, frequency: v.count, fingerprint: v.sample, evidence: Array.from(v.evidence).slice(0, 4) }))
+    .map(([type, v]) => ({
+      type,
+      frequency: v.count,
+      fingerprint: v.sample,
+      fingerprints: v.fingerprints.slice(0, 8),
+      evidence: Array.from(v.evidence).slice(0, 6),
+    }))
     .sort((a, b) => b.frequency - a.frequency);
 
   // --- components: merge variants by signature across pages ---
@@ -363,6 +405,35 @@ export function buildEvidence(bundle: CrawlBundle, cssParts: CssAnalysis[]): Evi
   const cssVariables: Record<string, string> = { ...css.customProperties };
   for (const p of bundle.pages) Object.assign(cssVariables, p.extract.cssVariables);
 
+  // --- brand context: assets (dedupe by url, keep page) ---
+  const assetMap = new Map<string, AssetRef & { page: string }>();
+  for (const p of bundle.pages) {
+    for (const a of p.extract.assets ?? []) {
+      if (!assetMap.has(a.url)) assetMap.set(a.url, { ...a, page: p.url });
+    }
+  }
+  const assets = Array.from(assetMap.values())
+    .sort((a, b) => b.width * b.height - a.width * a.height)
+    .slice(0, 80);
+
+  // --- brand context: content library (aggregate frequency) ---
+  const contentMap = new Map<string, { type: ContentItem["type"]; content: string; frequency: number }>();
+  for (const p of bundle.pages) {
+    for (const item of p.extract.content ?? []) {
+      const key = `${item.type}::${item.content.toLowerCase()}`;
+      const e = contentMap.get(key);
+      if (e) e.frequency++;
+      else contentMap.set(key, { type: item.type, content: item.content, frequency: 1 });
+    }
+  }
+  for (const item of extraContent) {
+    const key = `${item.type}::${item.content.toLowerCase()}`;
+    const e = contentMap.get(key);
+    if (e) e.frequency++;
+    else contentMap.set(key, { type: item.type, content: item.content, frequency: 1 });
+  }
+  const content = Array.from(contentMap.values()).sort((a, b) => b.frequency - a.frequency).slice(0, 160);
+
   const screenshots = bundle.pages.flatMap((p: CrawledPage) =>
     p.screenshots.map((s) => ({ key: s.storageKey, kind: s.kind, label: s.label, pageUrl: s.pageUrl })),
   );
@@ -387,6 +458,8 @@ export function buildEvidence(bundle: CrawlBundle, cssParts: CssAnalysis[]): Evi
     responsive: { mobileColumns: collectCols("mobile"), tabletColumns: collectCols("tablet"), desktopColumns: collectCols("desktop") },
     sectionPaddings: Array.from(sectionPad).slice(0, 16),
     contentHints: { headings: Array.from(headings).slice(0, 20), ctas: Array.from(ctas).slice(0, 20) },
+    assets,
+    content,
     screenshots,
   };
 }

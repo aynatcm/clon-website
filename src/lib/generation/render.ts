@@ -1,5 +1,7 @@
 import type { DesignDna } from "@/lib/dna/schema";
 import type { DesignSystem } from "@/lib/designsystem/schema";
+import type { BrandContext } from "@/lib/brand/schema";
+import { isUsableAssetUrl } from "@/lib/brand/assets";
 import type { PageArchitecture } from "./schema";
 
 /**
@@ -9,7 +11,7 @@ import type { PageArchitecture } from "./schema";
  * -input carry the real fingerprints). No generic per-type templates.
  */
 
-const esc = (s: string) =>
+export const esc = (s: string) =>
   String(s ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -91,8 +93,12 @@ function items(type: string, slots: Record<string, string>, count: number) {
   return pool.slice(0, Math.max(2, Math.min(pool.length, count || 3)));
 }
 
-function ctaText(slots: Record<string, string>) {
-  return slots.cta ?? slots.button ?? "Get started";
+function ctaText(slots: Record<string, string>, brand?: BrandContext) {
+  if (slots.cta) return slots.cta;
+  if (slots.button) return slots.button;
+  // Reuse a real brand CTA label (skip the design-system "pill-cta" marker).
+  const real = brand?.ctaPatterns.find((c) => /[a-z]/i.test(c) && !c.endsWith("-cta") && !/learn more|get started|start building/i.test(c));
+  return real ?? "Continue";
 }
 
 /**
@@ -100,7 +106,12 @@ function ctaText(slots: Record<string, string>) {
  * Pure SVG/HTML using brand CSS vars so it stays on-palette. Kind rotates so a
  * page shows variety (dashboard / chart / code / UI panel).
  */
-function mediaArtifact(kind: number, label: string): string {
+export function mediaArtifact(kind: number, label: string, assetUrl?: string): string {
+  // Media rules: prefer a REAL extracted asset; only fall back to a
+  // style-matched placeholder when no asset is available.
+  if (isUsableAssetUrl(assetUrl)) {
+    return `<div class="dna-media dna-media--asset"><img src="${esc(assetUrl)}" alt="${esc(label)}" loading="lazy" class="dna-media__img"></div>`;
+  }
   const k = ((kind % 4) + 4) % 4;
   const chrome = `<span class="dna-mock__dots"><i></i><i></i><i></i></span>`;
   let inner = "";
@@ -143,7 +154,7 @@ function mediaArtifact(kind: number, label: string): string {
         ${[1, 2, 3, 4].map((i) => `<div class="dna-mock__row"><span class="dna-mock__avatar"></span><span class="dna-mock__line2"></span><span class="dna-mock__pill"></span></div>`).join("")}
       </div>`;
   }
-  return `<div class="dna-media" role="img" aria-label="${esc(label)}"><div class="dna-mock">${inner}</div></div>`;
+  return `<div class="dna-media" data-generated-mock="true" role="img" aria-label="${esc(label)}"><div class="dna-mock">${inner}</div></div>`;
 }
 
 /** Instantiate one detected layout. */
@@ -151,12 +162,14 @@ function renderSection(
   s: PageArchitecture["sections"][number],
   layout: DesignSystem["layouts"][number] | undefined,
   idx: number,
+  brand?: BrandContext,
 ): string {
   const variant = (s.layout || layout?.variant || "stacked") as DesignSystem["layouts"][number]["variant"];
   const cols = layout?.columns ?? 3;
   const slots = s.contentSlots ?? {};
   const heading = s.heading ? `<h2>${esc(s.heading)}</h2>` : "";
   const sub = s.subheading ? `<p class="dna-section__sub">${esc(s.subheading)}</p>` : "";
+  const assetUrl = s.visualAssetUrl;
   const sectionTag = s.type === "footer" ? "footer" : "section";
   const id = s.type === "cta" || s.type === "footer-cta" || s.type === "contact-section" ? ' id="cta"' : "";
   const dataAttr = ` data-layout="${esc(s.type)}" data-variant="${esc(variant)}"`;
@@ -171,14 +184,18 @@ function renderSection(
           ${slots.eyebrow ? `<p class="dna-eyebrow">${esc(slots.eyebrow)}</p>` : ""}
           ${lead}
           ${sub}
-          <p style="margin-top:1.75rem;"><a class="dna-cta" href="#cta">${esc(ctaText(slots))}</a></p>
+          <p style="margin-top:1.75rem;"><a class="dna-cta" href="#cta">${esc(ctaText(slots, brand))}</a></p>
         </div>
-        ${mediaArtifact(idx, s.heading ?? "Product visual")}
+        ${mediaArtifact(idx, s.heading ?? "Product visual", assetUrl)}
       </div>`;
       break;
     }
     case "grid": {
-      const list = items(s.type, slots, layout?.itemCount ?? cols);
+      let list = items(s.type, slots, layout?.itemCount ?? cols);
+      // Prefer the brand's REAL feature names for feature/service grids.
+      if (brand && (s.type === "feature-grid" || s.type === "service-grid") && brand.features.length && !slotPairs(slots).length) {
+        list = brand.features.slice(0, Math.max(3, Math.min(6, cols))).map((f) => ({ title: f, body: "" }));
+      }
       const cards = list
         .map((it) => `<article class="dna-card"><h3>${esc(it.title)}</h3>${it.body ? `<p>${esc(it.body)}</p>` : ""}</article>`)
         .join("\n          ");
@@ -189,11 +206,21 @@ function renderSection(
       break;
     }
     case "logos": {
-      const logos = items(s.type, slots, layout?.itemCount ?? 6);
-      const names = logos.length ? logos.map((l) => l.title) : ["Acme", "Globex", "Initech", "Umbrella", "Hooli", "Stark"];
+      // Prefer real logo image assets; else brand product names; else labels.
+      const logoAssets = (brand?.assets ?? []).filter((a) => a.role === "logo" && isUsableAssetUrl(a.url)).slice(0, 6);
+      let logosHtml: string;
+      if (logoAssets.length >= 2) {
+        logosHtml = logoAssets
+          .map((a) => `<span class="dna-logos__item"><img src="${esc(a.url)}" alt="${esc(a.alt || "logo")}" loading="lazy" style="height:28px;width:auto;"></span>`)
+          .join("\n          ");
+      } else {
+        const names = (brand?.products.length ? brand.products : items(s.type, slots, 6).map((l) => l.title)).slice(0, 6);
+        const filled = names.length >= 2 ? names : ["Acme", "Globex", "Initech", "Umbrella", "Hooli", "Stark"];
+        logosHtml = filled.map((n) => `<span class="dna-logos__item">${esc(n)}</span>`).join("\n          ");
+      }
       inner = `<div style="text-align:center;">${heading || `<p class="dna-eyebrow">Trusted by teams worldwide</p>`}</div>
         <div class="dna-logos" style="margin-top:2rem;">
-          ${names.map((n) => `<span class="dna-logos__item">${esc(n)}</span>`).join("\n          ")}
+          ${logosHtml}
         </div>`;
       break;
     }
@@ -204,14 +231,14 @@ function renderSection(
           <label>Name<input class="dna-input" name="name" required style="margin-top:.35rem;"></label>
           <label>Email<input class="dna-input" type="email" name="email" required style="margin-top:.35rem;"></label>
           <label>Message<textarea class="dna-input" name="message" rows="4" style="margin-top:.35rem;"></textarea></label>
-          <button class="dna-button" type="submit">${esc(ctaText(slots))}</button>
+          <button class="dna-button" type="submit">${esc(ctaText(slots, brand))}</button>
         </form>
       </div>`;
       break;
     }
     case "media": {
       inner = `<div style="text-align:center;">${heading}${sub}</div>
-        <div style="margin-top:2rem;">${mediaArtifact(idx, s.heading ?? "Visual")}</div>`;
+        <div style="margin-top:2rem;">${mediaArtifact(idx, s.heading ?? "Visual", assetUrl)}</div>`;
       break;
     }
     case "centered": {
@@ -221,7 +248,7 @@ function renderSection(
         ${slots.eyebrow ? `<p class="dna-eyebrow">${esc(slots.eyebrow)}</p>` : ""}
         ${lead}
         ${sub}
-        <p style="margin-top:1.75rem;"><a class="dna-cta" href="#cta">${esc(ctaText(slots))}</a></p>
+        <p style="margin-top:1.75rem;"><a class="dna-cta" href="#cta">${esc(ctaText(slots, brand))}</a></p>
       </div>`;
       break;
     }
@@ -247,9 +274,9 @@ function renderSection(
   </${sectionTag}>`;
 }
 
-export function renderHtml(arch: PageArchitecture, system: DesignSystem, dna: DesignDna, css: string): string {
+export function renderHtml(arch: PageArchitecture, system: DesignSystem, dna: DesignDna, css: string, brand?: BrandContext): string {
   const layoutByType = new Map(system.layouts.map((l) => [l.type, l]));
-  const body = arch.sections.map((s, i) => renderSection(s, layoutByType.get(s.type), i)).join("\n");
+  const body = arch.sections.map((s, i) => renderSection(s, layoutByType.get(s.type), i, brand)).join("\n");
   const fontLinks = googleFontLinks(dna);
   return `<!DOCTYPE html>
 <html lang="en">

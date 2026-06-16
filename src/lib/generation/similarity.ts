@@ -1,5 +1,6 @@
 import type { DesignDna } from "@/lib/dna/schema";
 import type { DesignSystem } from "@/lib/designsystem/schema";
+import type { BrandContext } from "@/lib/brand/schema";
 import type { PageArchitecture, SimilarityReport } from "./schema";
 import { SimilarityReportSchema } from "./schema";
 import { env } from "@/lib/env";
@@ -38,19 +39,28 @@ export interface DnaAdherence {
 /** Does the HTML contain the structural class each section's variant requires? */
 function scoreStructuralAdherence(html: string, arch: PageArchitecture): { score: number; issues: string[] } {
   const issues: string[] = [];
-  let matched = 0;
-  for (const s of arch.sections) {
-    const variant = s.layout ?? "stacked";
-    let ok = true;
-    if (variant === "split") ok = /dna-split/.test(html) && /dna-media/.test(html);
-    else if (variant === "grid") ok = /dna-grid--[2-6]/.test(html) || /dna-grid\b/.test(html);
-    else if (variant === "form") ok = /<form|dna-input/.test(html);
-    else if (variant === "logos") ok = /dna-logos/.test(html);
-    else ok = /<section|<footer|<header/.test(html); // centered/stacked: section present
-    if (ok) matched++;
-    else issues.push(`layout: "${s.type}" (${variant}) structure not instantiated`);
+  const expected = {
+    split: arch.sections.filter((s) => s.layout === "split").length,
+    media: arch.sections.filter((s) => s.layout === "media").length,
+    grid: arch.sections.filter((s) => s.layout === "grid").length,
+    form: arch.sections.filter((s) => s.layout === "form").length,
+    logos: arch.sections.filter((s) => s.layout === "logos").length,
+  };
+  const actual = {
+    split: (html.match(/class="[^"]*\bdna-split\b/g) ?? []).length,
+    media: (html.match(/class="[^"]*\bdna-media\b/g) ?? []).filter((m) => !/data-generated-mock/.test(m)).length,
+    grid: (html.match(/class="[^"]*\bdna-grid\b/g) ?? []).length,
+    form: (html.match(/<form\b/g) ?? []).length,
+    logos: (html.match(/class="[^"]*\bdna-logos\b/g) ?? []).length,
+  };
+  let need = 0;
+  let got = 0;
+  for (const key of Object.keys(expected) as Array<keyof typeof expected>) {
+    need += expected[key];
+    got += Math.min(expected[key], actual[key]);
+    if (actual[key] < expected[key]) issues.push(`layout: expected ${expected[key]} ${key} section(s), rendered ${actual[key]}`);
   }
-  return { score: arch.sections.length ? Math.round((matched / arch.sections.length) * 100) : 100, issues };
+  return { score: need ? Math.round((got / need) * 100) : 100, issues };
 }
 
 export function scoreDnaAdherence(
@@ -124,15 +134,108 @@ export function scoreDnaAdherence(
  * (render failed), fall back to DNA-only but flag it so scores aren't trusted
  * as visual confirmation.
  */
+export interface BrandAdherence {
+  voice: number;
+  content: number;
+  assetUsage: number;
+  visualLanguage: number;
+  brandSimilarity: number;
+  issues: string[];
+}
+
 /**
- * Final score with requirement-9 weights:
- *   layout 40% · visual 30% · typography 15% · spacing 15%.
- * Layout dominates, so a layout mismatch is penalized heavily. Each bucket
- * blends the rendered re-extraction (preferred) with DNA-string adherence.
+ * Brand Similarity — evaluates voice, content style, asset usage and visual
+ * language reuse against the Brand Context. Penalizes forbidden generic copy
+ * and empty/placeholder media; rewards reuse of real assets + brand vocabulary.
+ */
+export function scoreBrandAdherence(
+  html: string,
+  brand: BrandContext | undefined,
+  arch: PageArchitecture,
+  dna: DesignDna,
+): BrandAdherence {
+  const issues: string[] = [];
+  const lower = html.toLowerCase();
+  const htmlNoStyle = html.replace(/<style[\s\S]*?<\/style>/gi, " ");
+  const text = lower.replace(/<style[\s\S]*?<\/style>/g, " ").replace(/<[^>]+>/g, " ");
+
+  // VOICE: no forbidden generic phrases + brand vocabulary present.
+  const forbidden = (brand?.forbiddenPhrases ?? []).filter((p) => text.includes(p.toLowerCase()));
+  const brokenCopy = [
+    /\bcomm and\b/i,
+    /\bau to\b/i,
+    /\bunderst and\b/i,
+    /\bnavigatefrom\b/i,
+    /\bproductoperations\b/i,
+    /\bproductdevelopment\b/i,
+    /\bbuild the future\b/i,
+    /\bjoin thousands\b/i,
+    /\btransform your business\b/i,
+  ].filter((re) => re.test(text));
+  let voice = 100 - forbidden.length * 20 - brokenCopy.length * 25;
+  if (forbidden.length) issues.push(`brand: generic phrases used — ${forbidden.join(", ")}`);
+  if (brokenCopy.length) issues.push(`brand: broken or generic copy fragments detected (${brokenCopy.length})`);
+  const vocab = brand?.brandVoice.vocabulary ?? [];
+  if (vocab.length) {
+    const hits = vocab.filter((w) => text.includes(w.toLowerCase())).length;
+    voice = clamp(Math.round(voice * 0.6 + (hits / vocab.length) * 100 * 0.4));
+  } else voice = clamp(voice);
+
+  // CONTENT: reuse of real headlines / feature names / CTA labels.
+  const corpus = [...(brand?.headlines ?? []), ...(brand?.features ?? []), ...(brand?.navigationPatterns ?? [])]
+    .map((s) => s.toLowerCase())
+    .filter((s) => s.length > 3);
+  let content = 60;
+  if (corpus.length) {
+    const reused = corpus.filter((c) => text.includes(c)).length;
+    const exactScore = Math.min(1, reused / Math.min(corpus.length, 8)) * 100;
+    const ctaCorpus = (brand?.ctaPatterns ?? []).map((s) => s.toLowerCase()).filter((s) => s.length > 3 && !s.endsWith("-cta"));
+    const ctaHits = ctaCorpus.filter((c) => text.includes(c)).length;
+    const ctaScore = ctaCorpus.length ? Math.min(1, ctaHits / Math.min(ctaCorpus.length, 4)) * 100 : exactScore;
+    const vocabHits = vocab.filter((w) => text.includes(w.toLowerCase())).length;
+    const vocabScore = vocab.length ? Math.min(1, vocabHits / Math.min(vocab.length, 8)) * 100 : exactScore;
+    content = clamp(Math.round(exactScore * 0.55 + ctaScore * 0.2 + vocabScore * 0.25));
+    if (reused === 0 && ctaHits === 0) issues.push("brand: no real brand copy reused");
+  }
+
+  // ASSET USAGE: media sections should use real assets (or filled mocks).
+  const mediaNeeded = arch.sections.filter((s) => s.layout === "split" || s.layout === "media" || s.layout === "logos").length;
+  const realImgs = (htmlNoStyle.match(/dna-media__img|dna-logos__item[^>]*>\s*<img/g) ?? []).length;
+  const mockFills = (htmlNoStyle.match(/data-generated-mock="true"|dna-mock\b/g) ?? []).length;
+  const emptyMedia = (htmlNoStyle.match(/class="dna-media"[^>]*>\s*<\/div>/g) ?? []).length;
+  const usableRealAssets = (brand?.assets ?? []).filter((a) => /^(https?:\/\/|data:image\/|\/)/.test(a.url) && /dashboard|product-shot|hero-image|illustration|feature-image|logo/.test(a.role)).length;
+  let assetUsage = mediaNeeded === 0 ? 80 : clamp(Math.round((Math.min(mediaNeeded, realImgs * 2 + (usableRealAssets ? 0 : mockFills)) / mediaNeeded) * 100));
+  const hasRealAsset = /dna-media__img|<img[^>]+(?:https?:|data:image|\/)/.test(htmlNoStyle);
+  if (hasRealAsset) assetUsage = Math.max(assetUsage, 85);
+  if (usableRealAssets > 0 && mockFills > 0) {
+    assetUsage = Math.min(assetUsage, 55);
+    issues.push("brand: generated mock media used despite real brand assets being available");
+  }
+  if (emptyMedia > 0) {
+    assetUsage = Math.min(assetUsage, 40);
+    issues.push(`brand: ${emptyMedia} empty media area(s)`);
+  }
+
+  // VISUAL LANGUAGE: motif reuse (corners + shadow + decoration cues).
+  let visualLanguage = 60;
+  if (dna.visualRules.cornerStyle === "pill" && /9999px|border-radius:\s*999/.test(html)) visualLanguage += 20;
+  if (dna.visualRules.shadowStyle !== "none" && /box-shadow|--shadow-/.test(html)) visualLanguage += 10;
+  if (/--color-(primary|cta|accent)/.test(html)) visualLanguage += 10;
+  visualLanguage = clamp(visualLanguage);
+
+  const brandSimilarity = clamp(Math.round(voice * 0.3 + content * 0.3 + assetUsage * 0.25 + visualLanguage * 0.15));
+  return { voice: clamp(voice), content, assetUsage, visualLanguage, brandSimilarity, issues };
+}
+
+/**
+ * Final score (Brand Extension weights):
+ *   layout 30% · visual 25% · brand 25% · typography 10% · spacing 10%.
+ * Each bucket blends rendered re-extraction (preferred) with string adherence.
  */
 export function combineSimilarity(
   dnaPart: DnaAdherence,
   visual: { score: number; breakdown: VisualBreakdown; issues: string[] } | null,
+  brandPart?: BrandAdherence,
 ): SimilarityReport {
   const visualUsed = !!visual && visual.breakdown.method === "rendered";
   const b = visual?.breakdown;
@@ -150,13 +253,17 @@ export function combineSimilarity(
     ? clamp(Math.round(b!.color * 0.6 + b!.corners * 0.4))
     : clamp(dnaPart.visual);
 
-  // TYPOGRAPHY (15%): rendered fonts preferred.
+  // TYPOGRAPHY (10%): rendered fonts preferred.
   const typography = visualUsed ? clamp(Math.max(b!.typography, Math.round(dnaPart.typography * 0.7))) : clamp(dnaPart.typography);
 
-  // SPACING (15%): system rhythm adherence.
+  // SPACING (10%): system rhythm adherence.
   const spacing = clamp(dnaPart.spacing);
 
-  const weighted = layout * 0.4 + visualBucket * 0.3 + typography * 0.15 + spacing * 0.15;
+  // BRAND (25%): voice + content + asset usage + visual language.
+  const brandSimilarity = brandPart ? clamp(brandPart.brandSimilarity) : clamp(Math.round(dnaPart.brand * 0.7));
+
+  // Brand Extension weights: layout 30 · visual 25 · brand 25 · typo 10 · spacing 10.
+  const weighted = layout * 0.3 + visualBucket * 0.25 + brandSimilarity * 0.25 + typography * 0.1 + spacing * 0.1;
   const overallSimilarity = visualUsed
     ? clamp(Math.round(weighted))
     : clamp(Math.min(80, Math.round(weighted))); // DNA-only cannot fully confirm
@@ -164,8 +271,18 @@ export function combineSimilarity(
   // For display: the rendered composite similarity.
   const visualSimilarity = visualUsed ? clamp(visual!.score) : 0;
 
-  const issues = [...dnaPart.issues, ...(visual?.issues ?? [])];
+  const issues = [...dnaPart.issues, ...(visual?.issues ?? []), ...(brandPart?.issues ?? [])];
   if (!visualUsed) issues.push("visual: rendered comparison unavailable — score capped (DNA-only)");
+  const structuralComplete = !!visual?.breakdown?.structuralComplete;
+  const passGate =
+    overallSimilarity >= env.SIMILARITY_THRESHOLD &&
+    visualSimilarity >= 75 &&
+    layout >= 80 &&
+    brandSimilarity >= 75 &&
+    (!brandPart || brandPart.assetUsage >= 75) &&
+    spacing >= 70 &&
+    structuralComplete;
+  if (!passGate) issues.push("quality gate: layout, visual, brand, spacing, and structural completeness must all pass");
 
   return SimilarityReportSchema.parse({
     typography,
@@ -177,10 +294,14 @@ export function combineSimilarity(
     spacing,
     dnaSimilarity: dnaPart.dnaSimilarity,
     visualSimilarity,
+    brandSimilarity,
     overallSimilarity,
     overall: overallSimilarity,
     visualBreakdown: visual?.breakdown,
-    passed: overallSimilarity >= env.SIMILARITY_THRESHOLD,
+    brandBreakdown: brandPart
+      ? { voice: brandPart.voice, content: brandPart.content, assetUsage: brandPart.assetUsage, visualLanguage: brandPart.visualLanguage }
+      : undefined,
+    passed: passGate,
     issues,
   });
 }

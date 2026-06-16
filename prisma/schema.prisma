@@ -70,6 +70,7 @@ model Project {
   screenshots   Screenshot[]
   designDna     DesignDna?
   designSystem  DesignSystem?
+  brandContext  BrandContext?
   generatedPages GeneratedPage[]
 
   @@index([status])
@@ -156,6 +157,17 @@ model DesignSystem {
   data      Json
   // Self-contained CSS (variables + base + component classes).
   css       String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Brand Context Package (Phase 6.5) — assets, copy, voice, patterns.
+model BrandContext {
+  id        String   @id @default(cuid())
+  projectId String   @unique
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  // BrandContextSchema: assets, copyLibrary, brandVoice, screenshotAnalysis, patterns.
+  data      Json
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

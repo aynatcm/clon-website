@@ -67,6 +67,15 @@ export interface InPageResult {
     hasCheckmarks: boolean;
     textSample: string;
     background?: string;
+    mediaSide: "left" | "right" | "top" | "bottom" | "none";
+    hasEyebrow: boolean;
+    ctaCount: number;
+    cardCount: number;
+    cardHasIcon: boolean;
+    cardHasCta: boolean;
+    paddingTop: string;
+    paddingBottom: string;
+    gap: string;
   }>;
   components: {
     button: ComponentVariantRaw[];
@@ -75,6 +84,8 @@ export interface InPageResult {
     nav: ComponentVariantRaw[];
     badge: ComponentVariantRaw[];
   };
+  assets: Array<{ url: string; type: string; alt: string; width: number; height: number; role: string }>;
+  content: Array<{ type: string; content: string }>;
   stylesheetHrefs: string[];
   inlineStyles: string[];
 }
@@ -462,15 +473,33 @@ export function extractInPage(): InPageResult {
   };
 
   const sectionCandidates = Array.from(
-    document.querySelectorAll("body > section, main > section, main > div, body > div > section, section, footer, header"),
+    document.querySelectorAll("body > section, main > section, main > div, main > div > div, body > div > section, section, footer, header"),
   );
   const seenSec = new Set<Element>();
   const fingerprints: InPageResult["sectionFingerprints"] = [];
-  // keep only sizable, non-nested top-level-ish sections
+  const isBroadWrapper = (el: Element) => {
+    const r = (el as HTMLElement).getBoundingClientRect();
+    const tag = el.tagName.toLowerCase();
+    if (tag === "header" || tag === "footer" || tag === "section") return false;
+    const headings = el.querySelectorAll("h1,h2,h3,h4").length;
+    const media = el.querySelectorAll("img,svg,picture,video").length;
+    const links = el.querySelectorAll("a,button,[role='button']").length;
+    const sectionishChildren = Array.from(el.children).filter((child) => {
+      const cr = (child as HTMLElement).getBoundingClientRect();
+      if (cr.height < 120 || cr.width < VW * 0.35) return false;
+      return child.querySelector("h1,h2,h3,h4,img,svg,picture,video,form");
+    }).length;
+    return (
+      (r.height > VH * 1.6 && headings >= 4 && sectionishChildren >= 2) ||
+      (r.height > VH * 1.2 && media >= 20) ||
+      (headings >= 8 && links >= 12)
+    );
+  };
+  // keep only sizable leaf-like sections; broad layout wrappers hide the real recipes.
   const sized = sectionCandidates
     .filter((el) => {
       const r = (el as HTMLElement).getBoundingClientRect();
-      return r.height > 120 && r.width > VW * 0.4;
+      return r.height > 120 && r.width > VW * 0.4 && !isBroadWrapper(el);
     })
     .slice(0, 60);
   for (let i = 0; i < sized.length; i++) {
@@ -501,6 +530,44 @@ export function extractInPage(): InPageResult {
       text: text.slice(0, 200),
     };
     const type = classifySection(el, fpData, i === sized.length - 1, i === 0);
+
+    // --- recipe structural facts ---
+    const firstHeading = el.querySelector("h1,h2,h3");
+    const firstImg = el.querySelector("img,svg,picture,video");
+    let mediaSide: "left" | "right" | "top" | "bottom" | "none" = "none";
+    if (firstImg) {
+      const ir = (firstImg as HTMLElement).getBoundingClientRect();
+      const hr = firstHeading ? (firstHeading as HTMLElement).getBoundingClientRect() : null;
+      if (fpData.columns >= 2 && hr) mediaSide = ir.left + ir.width / 2 < hr.left ? "left" : "right";
+      else if (hr) mediaSide = ir.top < hr.top ? "top" : "bottom";
+      else mediaSide = "top";
+    }
+    // eyebrow: short text node/element before the first heading
+    let hasEyebrow = false;
+    if (firstHeading) {
+      const prev = firstHeading.previousElementSibling;
+      const ptxt = (prev?.textContent || "").trim();
+      hasEyebrow = !!prev && ptxt.length > 0 && ptxt.length < 32 && !/^h[1-6]$/i.test(prev.tagName);
+    }
+    // repeated cards = direct children of the densest grid/flex container
+    let cardCount = 0;
+    let cardHasIcon = false;
+    let cardHasCta = false;
+    const gridContainer =
+      Array.from(el.querySelectorAll("*")).find((d) => {
+        const ds = getComputedStyle(d);
+        return (ds.display === "grid" || ds.display === "flex") && (d as HTMLElement).childElementCount >= 3;
+      }) || null;
+    if (gridContainer && fpData.columns >= 2) {
+      const kids = Array.from(gridContainer.children).filter((k) => (k as HTMLElement).getBoundingClientRect().height > 40);
+      cardCount = kids.length;
+      const sampleCard = kids[0];
+      if (sampleCard) {
+        cardHasIcon = !!sampleCard.querySelector("svg,img");
+        cardHasCta = !!sampleCard.querySelector('a,button,[class*="btn"]');
+      }
+    }
+
     fingerprints.push({
       type,
       tag: el.tagName.toLowerCase(),
@@ -523,6 +590,15 @@ export function extractInPage(): InPageResult {
       hasCheckmarks: fpData.hasCheckmarks,
       textSample: fpData.text.slice(0, 160),
       background: norm(cs.backgroundColor) || undefined,
+      mediaSide,
+      hasEyebrow,
+      ctaCount: fpData.buttonCount,
+      cardCount,
+      cardHasIcon,
+      cardHasCta,
+      paddingTop: cs.paddingTop,
+      paddingBottom: cs.paddingBottom,
+      gap: cs.gap || "0px",
     });
   }
 
@@ -622,6 +698,88 @@ export function extractInPage(): InPageResult {
     padding: `${cs.paddingTop} ${cs.paddingRight} ${cs.paddingBottom} ${cs.paddingLeft}`,
   }));
 
+  // === BRAND CONTEXT: visual assets ===
+  const assets: InPageResult["assets"] = [];
+  const navScope = navEls;
+  const heroScope = heroEl;
+  const inferAssetRole = (el: Element, alt: string, url: string, w: number, h: number, type: string): string => {
+    const hay = `${alt} ${url} ${(el.getAttribute("class") || "")} ${(el.closest("[class]")?.getAttribute("class") || "")}`.toLowerCase();
+    const section = el.closest("section,header,footer,[class]");
+    const sechay = (section?.getAttribute("class") || "").toLowerCase();
+    const inNav = navScope.some((n) => n.contains(el));
+    const inHero = heroScope ? heroScope.contains(el) : false;
+    const square = w > 0 && h > 0 && Math.abs(w - h) / Math.max(w, h) < 0.2;
+    if (type === "svg" && Math.max(w, h) <= 48) return "icon";
+    if (/logo/.test(hay) || (inNav && Math.max(w, h) <= 200)) return "logo";
+    if (/dashboard|app-|screenshot|product-ui|console/.test(hay)) return "dashboard";
+    if (/testimonial|avatar|review/.test(sechay) && square && Math.max(w, h) <= 120) return "testimonial-avatar";
+    if (/team|people|member|founder|staff/.test(sechay) && square) return "team-photo";
+    if (inHero && Math.max(w, h) >= 240) return /screenshot|app|ui|product/.test(hay) ? "product-shot" : "hero-image";
+    if (/feature/.test(sechay)) return "feature-image";
+    if (type === "background") return "background-graphic";
+    if (type === "svg") return Math.max(w, h) > 120 ? "illustration" : "icon";
+    if (/illustration|graphic|blob|pattern/.test(hay)) return "illustration";
+    if (square && Math.max(w, h) <= 96) return "icon";
+    return Math.max(w, h) >= 240 ? "product-shot" : "feature-image";
+  };
+  const pushedUrls = new Set<string>();
+  const addAsset = (el: Element, url: string, type: string, alt: string, w: number, h: number) => {
+    if (!url || url.startsWith("data:") || pushedUrls.has(url)) return;
+    if (Math.max(w, h) < 24 && type !== "icon") return; // skip trackers/spacers
+    pushedUrls.add(url);
+    assets.push({ url, type, alt: alt.slice(0, 120), width: Math.round(w), height: Math.round(h), role: inferAssetRole(el, alt, url, w, h, type) });
+  };
+  for (const img of Array.from(document.querySelectorAll("img")).slice(0, 120)) {
+    const im = img as HTMLImageElement;
+    const r = im.getBoundingClientRect();
+    addAsset(im, im.currentSrc || im.src, "img", im.alt || "", im.naturalWidth || r.width, im.naturalHeight || r.height);
+  }
+  for (const src of Array.from(document.querySelectorAll("picture source")).slice(0, 40)) {
+    const ss = (src as HTMLSourceElement).srcset?.split(",")[0]?.trim().split(" ")[0];
+    if (ss) addAsset(src, new URL(ss, location.href).href, "picture", "", 400, 300);
+  }
+  for (const v of Array.from(document.querySelectorAll("video[poster]")).slice(0, 10)) {
+    const r = (v as HTMLElement).getBoundingClientRect();
+    addAsset(v, (v as HTMLVideoElement).poster, "video-poster", "", r.width, r.height);
+  }
+  for (const s of Array.from(document.querySelectorAll("svg")).slice(0, 60)) {
+    const r = (s as unknown as Element).getBoundingClientRect();
+    if (r.width < 8) continue;
+    // inline svg has no URL; record role by size so generator knows iconography/illustration exists
+    addAsset(s, `inline-svg-${assets.length}`, "svg", s.getAttribute("aria-label") || "", r.width, r.height);
+  }
+  for (const el of Array.from(document.querySelectorAll('[style*="background"],[class*="hero"],[class*="bg-"]')).slice(0, 80)) {
+    const bg = getComputedStyle(el).backgroundImage || "";
+    const m = bg.match(/url\(["']?([^"')]+)["']?\)/);
+    if (m) {
+      const r = (el as HTMLElement).getBoundingClientRect();
+      addAsset(el, new URL(m[1], location.href).href, "background", "", r.width, r.height);
+    }
+  }
+
+  // === BRAND CONTEXT: content library ===
+  const content: InPageResult["content"] = [];
+  const clean = (t: string | null) => (t || "").replace(/\s+/g, " ").trim();
+  const addContent = (type: string, text: string, min = 2, max = 160) => {
+    const t = clean(text);
+    if (t.length >= min && t.length <= max) content.push({ type, content: t });
+  };
+  const h1 = document.querySelector("h1");
+  if (h1) addContent("tagline", h1.textContent, 4, 120);
+  for (const h of Array.from(document.querySelectorAll("h1,h2")).slice(0, 24)) addContent("headline", h.textContent, 4, 140);
+  for (const h of Array.from(document.querySelectorAll("h3,h4")).slice(0, 30)) addContent("feature-name", h.textContent, 2, 80);
+  // subheadline: first paragraph after a heading
+  for (const h of Array.from(document.querySelectorAll("h1,h2")).slice(0, 10)) {
+    const p = h.parentElement?.querySelector("p") || h.nextElementSibling;
+    if (p && p.tagName === "P") addContent("subheadline", p.textContent, 12, 200);
+  }
+  for (const b of Array.from(document.querySelectorAll('button,a[class*="btn"],a[class*="button"],.btn,.button,[role="button"]')).slice(0, 40))
+    addContent("cta-label", b.textContent, 2, 40);
+  for (const a of (navEls[0] ? Array.from(navEls[0].querySelectorAll("a")) : []).slice(0, 24)) addContent("nav-label", a.textContent, 2, 30);
+  // pricing terms
+  for (const el of Array.from(document.querySelectorAll('[class*="price"],[class*="plan"],[class*="tier"]')).slice(0, 20))
+    addContent("pricing-term", el.querySelector("h2,h3,h4,strong")?.textContent || "", 2, 40);
+
   // --- legacy blocks (kept for back-compat) ---
   const blocks: InPageResult["blocks"] = fingerprints.slice(0, 40).map((f) => ({
     type: f.type,
@@ -673,6 +831,8 @@ export function extractInPage(): InPageResult {
     blocks,
     sectionFingerprints: fingerprints,
     components: { button, card, input, nav: navComp, badge },
+    assets,
+    content,
     stylesheetHrefs,
     inlineStyles,
   };

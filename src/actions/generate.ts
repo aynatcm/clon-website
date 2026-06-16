@@ -2,10 +2,12 @@
 
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/db";
-import { buildDesignSystem } from "@/lib/designsystem";
 import { DesignSystemSchema } from "@/lib/designsystem/schema";
 import { DesignDnaSchema } from "@/lib/dna/schema";
+import { BrandContextSchema } from "@/lib/brand/schema";
+import { withEmbeddedScreenshotAssets } from "@/lib/brand/assets";
 import { generatePage, GenerationRequestSchema } from "@/lib/generation";
+import { getObjectBuffer } from "@/lib/storage/r2";
 
 /**
  * Phases 8-11 — generate a page from a project's stored Design DNA + System.
@@ -18,30 +20,26 @@ export async function createGeneration(
 ): Promise<{ id: string }> {
   const request = GenerationRequestSchema.parse(input);
 
-  const [dnaRow, sysRow] = await Promise.all([
+  const [dnaRow, sysRow, brandRow] = await Promise.all([
     prisma.designDna.findUnique({ where: { projectId } }),
     prisma.designSystem.findUnique({ where: { projectId } }),
+    prisma.brandContext.findUnique({ where: { projectId } }),
   ]);
   if (!dnaRow) throw new Error("Design DNA not ready for this project");
+  if (!sysRow?.css) throw new Error("Design System recipes are not ready. Re-run analysis before generating pages.");
 
   const dna = DesignDnaSchema.parse(dnaRow.data);
-  let system;
-  let css: string;
-  if (sysRow?.css) {
-    system = DesignSystemSchema.parse(sysRow.data);
-    css = sysRow.css;
-  } else {
-    const built = buildDesignSystem(dna);
-    system = built.system;
-    css = built.css;
-  }
+  const system = DesignSystemSchema.parse(sysRow.data);
+  const css = sysRow.css;
+  if (!system.recipes?.length) throw new Error("Section Recipes are not ready. Re-run analysis before generating pages.");
+  const brand = await withEmbeddedScreenshotAssets(brandRow ? BrandContextSchema.parse(brandRow.data) : undefined, getObjectBuffer);
 
   const gen = await prisma.generatedPage.create({
     data: { projectId, pageType: request.pageType, request: request as unknown as object, status: "GENERATING" },
   });
 
   try {
-    const result = await generatePage(request, dna, system, css);
+    const result = await generatePage(request, dna, system, css, { brand });
     await prisma.generatedPage.update({
       where: { id: gen.id },
       data: {

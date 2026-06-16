@@ -22,17 +22,23 @@ export const VIEWPORTS: ViewportSpec[] = [
 
 /** Common page slugs the crawler tries to discover from the homepage. */
 export const TARGET_PAGE_HINTS = [
-  "about",
-  "pricing",
-  "contact",
-  "careers",
-  "jobs",
   "product",
   "products",
   "features",
-  "blog",
+  "solutions",
+  "platform",
+  "use-cases",
+  "customers",
+  "case-studies",
+  "pricing",
   "docs",
   "documentation",
+  "changelog",
+  "blog",
+  "about",
+  "careers",
+  "jobs",
+  "contact",
 ] as const;
 
 /** A computed-style sample for one representative selector. */
@@ -129,6 +135,16 @@ export interface SectionFingerprint {
   hasCheckmarks: boolean; // ✓/check icons (comparison/pricing)
   textSample: string;
   background?: string;
+  // Recipe structural facts (Phase 7.5).
+  mediaSide: "left" | "right" | "top" | "bottom" | "none";
+  hasEyebrow: boolean; // short kicker above the heading
+  ctaCount: number;
+  cardCount: number; // repeated child blocks in a grid
+  cardHasIcon: boolean;
+  cardHasCta: boolean;
+  paddingTop: string;
+  paddingBottom: string;
+  gap: string;
 }
 
 /** A grouped style signature for a component (one row of `variants`). */
@@ -154,6 +170,42 @@ export interface ComponentFingerprintSet {
   badge: ComponentVariant[];
 }
 
+/** A visual asset discovered during crawl (Brand Context, Phase 6.5). */
+export interface AssetRef {
+  url: string;
+  type: "img" | "picture" | "svg" | "video-poster" | "background" | "logo" | "icon";
+  alt: string;
+  width: number;
+  height: number;
+  // Inferred semantic role.
+  role:
+    | "hero-image"
+    | "product-shot"
+    | "dashboard"
+    | "illustration"
+    | "logo"
+    | "testimonial-avatar"
+    | "feature-image"
+    | "team-photo"
+    | "background-graphic"
+    | "icon";
+}
+
+/** A piece of copy harvested from the page (Brand Context content library). */
+export interface ContentItem {
+  type:
+    | "headline"
+    | "subheadline"
+    | "feature-name"
+    | "benefit"
+    | "product-name"
+    | "pricing-term"
+    | "nav-label"
+    | "cta-label"
+    | "tagline";
+  content: string;
+}
+
 /** Everything extracted from a single page at desktop viewport. */
 export interface PageExtract {
   url: string;
@@ -171,6 +223,9 @@ export interface PageExtract {
   sectionFingerprints: SectionFingerprint[];
   // Component variant fingerprints (buttons/cards/inputs/nav/badges).
   components: ComponentFingerprintSet;
+  // Brand context raw signal (Phase 6.5): visual assets + content library.
+  assets: AssetRef[];
+  content: ContentItem[];
   // Per-viewport layout signal for responsive behavior.
   responsive: Record<Viewport, { documentWidth: number; columns: number[] }>;
   // External stylesheet hrefs + any inline <style> text (for PostCSS, Phase 5).

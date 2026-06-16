@@ -76,7 +76,7 @@ export default async function GeneratePage({ params }: { params: Promise<{ id: s
                   <CardContent className="space-y-3">
                     {sim?.success && (
                       <>
-                        <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                        <div className="grid grid-cols-4 gap-2 text-center text-xs">
                           <div className="rounded-md bg-black/5 py-1.5">
                             <div className="font-semibold">{sim.data.dnaSimilarity}</div>
                             <div className="text-[var(--color-muted)]">DNA</div>
@@ -84,6 +84,10 @@ export default async function GeneratePage({ params }: { params: Promise<{ id: s
                           <div className="rounded-md bg-black/5 py-1.5">
                             <div className="font-semibold">{sim.data.visualSimilarity}</div>
                             <div className="text-[var(--color-muted)]">visual</div>
+                          </div>
+                          <div className="rounded-md bg-black/5 py-1.5">
+                            <div className="font-semibold">{sim.data.brandSimilarity}</div>
+                            <div className="text-[var(--color-muted)]">brand</div>
                           </div>
                           <div className="rounded-md bg-[var(--color-primary)]/10 py-1.5 text-[var(--color-primary)]">
                             <div className="font-semibold">{sim.data.overallSimilarity}</div>

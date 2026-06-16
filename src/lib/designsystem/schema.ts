@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SectionRecipeSchema, ContentPatternSchema } from "@/lib/recipe/schema";
 
 /**
  * Phase 6 — Design System: the actionable layer derived from the Design DNA.
@@ -68,6 +69,9 @@ export const DesignSystemSchema = z.object({
     component: z.array(z.string()),
     layout: z.array(z.string()),
   }),
+  // Phase 7.5 — Section Recipes + Content DNA (generation source of truth).
+  recipes: z.array(SectionRecipeSchema).default([]),
+  contentPattern: ContentPatternSchema.optional(),
 });
 
 export type DesignSystem = z.infer<typeof DesignSystemSchema>;

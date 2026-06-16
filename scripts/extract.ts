@@ -8,6 +8,8 @@ import path from "node:path";
 import { extract } from "../src/lib/extraction";
 import { buildDeterministicDna } from "../src/lib/dna/deterministic";
 import { buildDesignSystem } from "../src/lib/designsystem";
+import { buildBrandContext } from "../src/lib/brand";
+import { buildRecipeBook } from "../src/lib/recipe";
 import type { CrawlBundle } from "../src/lib/crawler/types";
 
 async function main() {
@@ -55,7 +57,6 @@ async function main() {
   console.log("cornerStyle:", dna.visualRules.cornerStyle, "shadow:", dna.visualRules.shadowStyle);
 
   const { system, css } = buildDesignSystem(dna);
-  await fs.writeFile(path.join(outDir, "design-system.json"), JSON.stringify(system, null, 2));
   await fs.writeFile(path.join(outDir, "design-system.css"), css);
   console.log("\n=== Design System ===");
   console.log("color tokens:", Object.keys(system.tokens.colors).join(", "));
@@ -63,7 +64,28 @@ async function main() {
   console.log("components:", system.components.map((c) => c.className).join(", "));
   console.log("layouts:", system.layouts.map((l) => l.type).join(", "));
   console.log("css bytes:", css.length);
-  console.log(`\nWrote design-dna.json, design-system.json, design-system.css`);
+
+  const brand = await buildBrandContext(evidence, dna);
+  await fs.writeFile(path.join(outDir, "brand-context.json"), JSON.stringify(brand, null, 2));
+  console.log("\n=== Brand Context (Phase 6.5) ===");
+  console.log("assets:", brand.assets.length, "(roles:", Array.from(new Set(brand.assets.map((a) => a.role))).join(", ") + ")");
+  console.log("copy items:", brand.copyLibrary.length, "| headlines:", brand.headlines.length, "| features:", brand.features.length);
+  console.log("voice:", brand.brandVoice.tone, "| sentence:", brand.brandVoice.sentenceLength, "| tech:", brand.brandVoice.technicalDepth, "| conversion:", brand.brandVoice.conversionStyle);
+  console.log("vocabulary:", brand.brandVoice.vocabulary.slice(0, 8).join(", "));
+  console.log("cta patterns:", brand.ctaPatterns.slice(0, 6).join(", "));
+  console.log("imagery:", brand.screenshotAnalysis.imageryStyle, "| product presentation:", brand.screenshotAnalysis.productPresentationStyle);
+
+  // Phase 7.5 — Section Recipes + Content DNA, merged into the design system.
+  const book = buildRecipeBook(evidence, dna, brand);
+  system.recipes = book.recipes;
+  system.contentPattern = book.contentPattern;
+  await fs.writeFile(path.join(outDir, "design-system.json"), JSON.stringify(system, null, 2));
+  await fs.writeFile(path.join(outDir, "recipe-book.json"), JSON.stringify(book, null, 2));
+  console.log("\n=== Section Recipes (Phase 7.5) ===");
+  for (const r of book.recipes)
+    console.log(`  ${r.type} [${r.variant}] cols=${r.columns} media=${r.mediaPlacement} cta=${r.ctaCount}${r.card ? ` cards=${r.card.count}(${r.card.slots.join("/")})` : ""} slots=[${r.slots.map((s) => s.kind).join(",")}]`);
+  console.log("contentPattern headline:", JSON.stringify(book.contentPattern.headline), "| cta verbLed:", book.contentPattern.cta.verbLed);
+  console.log(`\nWrote design-dna.json, design-system.json, design-system.css, brand-context.json, recipe-book.json`);
 }
 
 main().catch((e) => {

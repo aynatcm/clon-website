@@ -1,8 +1,10 @@
 import type { DesignDna } from "@/lib/dna/schema";
 import type { DesignSystem } from "@/lib/designsystem/schema";
+import type { BrandContext } from "@/lib/brand/schema";
 import { complete, aiFeatures } from "@/lib/ai/claude";
 import { renderHtml } from "./render";
 import type { PageArchitecture, SimilarityReport } from "./schema";
+import { generationContextBlock } from "./promptContext";
 
 /**
  * Phase 11 — production HTML. Single self-contained file with the design-system
@@ -33,7 +35,11 @@ Hard requirements:
   Preserve grid/column counts exactly as given. If a layout is a 12-column split, render display:grid with two columns (content + visual).
 - Apply component fingerprints: buttons use dna-button/dna-cta (measured radius/padding/weight/shadow); cards use dna-card (measured radius/border/shadow/padding); inputs use dna-input.
 - Use ONLY the brand's colors, fonts, radii, spacing. No foreign styles. No generic sections.
-- Semantic HTML5, accessible (labels, alt, aria, landmarks), responsive, SEO-friendly. Real on-brand copy. NO lorem ipsum / placeholders / TODOs.
+- MEDIA: every media-bearing section MUST contain a real visual. If the section provides visualAssetUrl, render <img src="{url}" alt="..." class="dna-media__img"> inside .dna-media. NEVER output an empty <div class="dna-media"></div>. If no asset, build a style-matched mock (window chrome + chart/code/UI), never empty.
+- ASSETS: use exact URLs from MANDATORY ASSET LIBRARY. Never make up image URLs. If a section has media, choose a crawled asset matching the section role before falling back to a mock.
+- VARIABLES: page-specific CSS must reuse ORIGINAL CSS VARIABLES / RAW SOURCE TOKENS when possible; avoid introducing unrelated token names or arbitrary colors.
+- COPY/VOICE: write in the brand's voice (tone, sentence length, vocabulary). Reuse the brand's real headlines and CTA labels. NEVER use the forbidden generic phrases. Echo the product's actual terminology.
+- Semantic HTML5, accessible (labels, alt, aria, landmarks), responsive, SEO-friendly. NO lorem ipsum / placeholders / TODOs.
 - Output ONLY the HTML.`;
 
 export async function generateHtml(
@@ -41,9 +47,10 @@ export async function generateHtml(
   dna: DesignDna,
   system: DesignSystem,
   css: string,
-  opts: { refineFrom?: { html: string; report: SimilarityReport } } = {},
+  opts: { refineFrom?: { html: string; report: SimilarityReport }; brand?: BrandContext } = {},
 ): Promise<string> {
-  const fallback = renderHtml(arch, system, dna, css);
+  const brand = opts.brand;
+  const fallback = renderHtml(arch, system, dna, css, brand);
   if (!aiFeatures.ai) return fallback;
 
   const refine = opts.refineFrom
@@ -64,15 +71,41 @@ Visual rules: whitespace=${dna.visualRules.whitespace}, corners=${dna.visualRule
 
 === SECTION → DETECTED LAYOUT (instantiate each structure exactly) ===
 ${JSON.stringify(
-    arch.sections.map((s) => {
-      const l = system.layouts.find((x) => x.type === s.type);
-      return { type: s.type, variant: s.layout || l?.variant, columns: l?.columns, hasMedia: l?.hasMedia, hasForm: l?.hasForm, structure: l?.structure };
-    }),
-  )}
+  arch.sections.map((s) => {
+    const l = system.layouts.find((x) => x.type === s.type);
+    return {
+      type: s.type,
+      variant: s.layout || l?.variant,
+      columns: l?.columns,
+      hasMedia: l?.hasMedia,
+      hasForm: l?.hasForm,
+      structure: l?.structure,
+    };
+  }),
+)}
 
 === COMPONENT FINGERPRINTS (buttons/cards/inputs must inherit these) ===
 ${JSON.stringify(system.components.map((c) => ({ type: c.type, className: c.className, fingerprint: c.fingerprint })))}
-
+${
+  brand
+    ? `
+=== BRAND VOICE (write in this voice) ===
+${JSON.stringify(brand.brandVoice)}
+=== REAL COPY LIBRARY (reuse vocabulary, headline & CTA style) ===
+headlines: ${JSON.stringify(brand.headlines.slice(0, 12))}
+features: ${JSON.stringify(brand.features.slice(0, 12))}
+ctaLabels: ${JSON.stringify(brand.ctaPatterns)}
+navLabels: ${JSON.stringify(brand.navigationPatterns)}
+${generationContextBlock(brand, system)}
+=== SCREENSHOT / IMAGERY ANALYSIS ===
+${JSON.stringify(brand.screenshotAnalysis)}
+=== SECTION PATTERNS ===
+${JSON.stringify(brand.sectionPatterns)}
+=== FORBIDDEN GENERIC PHRASES (never write these) ===
+${JSON.stringify(brand.forbiddenPhrases)}
+`
+    : ""
+}
 === DESIGN SYSTEM CSS (include verbatim inside <style>) ===
 ${css}
 
@@ -85,7 +118,11 @@ ${refine}
 Produce the complete HTML file now. Every section must reproduce its detected layout's structure and column count.`;
 
   try {
-    const text = await complete(prompt, { system: SYSTEM, maxTokens: 16000, temperature: 0.4 });
+    const text = await complete(prompt, {
+      system: SYSTEM,
+      maxTokens: 16000,
+      temperature: 0.4,
+    });
     const html = extractHtml(text);
     if (html && html.length > 400 && /<\/html>/i.test(html)) return html;
     return fallback;

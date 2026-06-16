@@ -52,6 +52,7 @@ function structuralCensus(): StructuralCensus {
 
   function hasArtifact(el: Element | null): boolean {
     if (!el) return false;
+    if ((el as HTMLElement).dataset.generatedMock === "true") return false;
     // real visual = child elements (svg/mockup) OR a background IMAGE (url),
     // NOT a decorative gradient alone.
     if (el.childElementCount > 0) return true;

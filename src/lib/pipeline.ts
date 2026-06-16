@@ -5,6 +5,8 @@ import { firecrawlSite } from "@/lib/firecrawl";
 import { extract, type UploadedSource } from "@/lib/extraction";
 import { synthesizeDna } from "@/lib/dna/synthesize";
 import { buildDesignSystem } from "@/lib/designsystem";
+import { buildBrandContext } from "@/lib/brand";
+import { buildRecipeBook } from "@/lib/recipe";
 import { projectKey, putObject } from "@/lib/storage/r2";
 import type { ShotKind } from "@prisma/client";
 
@@ -86,14 +88,27 @@ export async function runAnalysis(
       update: { data: dna as unknown as object, confidence: dna.provenance.confidence },
     });
 
-    // --- Phase 6: design system ---
+    // --- Phase 6.5: brand context package (assets, copy, voice, patterns) ---
+    const brandContext = await buildBrandContext(evidence, dna);
+    await prisma.brandContext.upsert({
+      where: { projectId },
+      create: { projectId, data: brandContext as unknown as object },
+      update: { data: brandContext as unknown as object },
+    });
+    log(`brand context: ${brandContext.assets.length} assets, ${brandContext.copyLibrary.length} copy items, voice=${brandContext.brandVoice.tone}`);
+
+    // --- Phase 6/7.5: design system + Section Recipes (Content DNA) ---
     await prisma.project.update({ where: { id: projectId }, data: { status: "BUILDING" } });
     const { system, css } = buildDesignSystem(dna);
+    const book = buildRecipeBook(evidence, dna, brandContext);
+    system.recipes = book.recipes;
+    system.contentPattern = book.contentPattern;
     await prisma.designSystem.upsert({
       where: { projectId },
       create: { projectId, data: system as unknown as object, css },
       update: { data: system as unknown as object, css },
     });
+    log(`recipes: ${book.recipes.length} section recipes (${book.recipes.map((r) => r.type).join(", ")})`);
 
     await prisma.project.update({ where: { id: projectId }, data: { status: "READY" } });
     log("analysis complete");

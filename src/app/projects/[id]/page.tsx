@@ -5,8 +5,10 @@ import { safeDb, dbReady } from "@/lib/safe";
 import { objectUrl } from "@/lib/storage/r2";
 import { DesignDnaSchema } from "@/lib/dna/schema";
 import { DesignSystemSchema } from "@/lib/designsystem/schema";
+import { BrandContextSchema } from "@/lib/brand/schema";
 import { AnalyzeControls } from "@/components/AnalyzeControls";
 import { DnaViewer } from "@/components/DnaViewer";
+import { BrandPanel } from "@/components/BrandPanel";
 import { Card, CardContent, CardHeader, CardTitle, Badge, Button } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
@@ -28,6 +30,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
         include: {
           designDna: true,
           designSystem: true,
+          brandContext: true,
           screenshots: { take: 12, orderBy: { createdAt: "asc" } },
           _count: { select: { pages: true, screenshots: true, generatedPages: true } },
         },
@@ -38,6 +41,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
 
   const dna = project.designDna ? DesignDnaSchema.safeParse(project.designDna.data) : null;
   const system = project.designSystem ? DesignSystemSchema.safeParse(project.designSystem.data) : null;
+  const brand = project.brandContext ? BrandContextSchema.safeParse(project.brandContext.data) : null;
 
   const shots = await Promise.all(
     project.screenshots.map(async (s) => ({ ...s, url: await objectUrl(s.storageKey) })),
@@ -75,7 +79,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
         </CardContent>
       </Card>
 
-      {dna?.success ? (
+      {dna?.success && (
         <section className="space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold">Design DNA</h2>
@@ -86,7 +90,16 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
           </div>
           <DnaViewer dna={dna.data} system={system?.success ? system.data : undefined} />
         </section>
-      ) : (
+      )}
+
+      {brand?.success && (
+        <section className="space-y-3">
+          <h2 className="text-lg font-semibold">Brand Context (Phase 6.5)</h2>
+          <BrandPanel brand={brand.data} />
+        </section>
+      )}
+
+      {!dna?.success && (
         project.status !== "READY" && (
           <Card>
             <CardContent className="text-sm text-[var(--color-muted)]">

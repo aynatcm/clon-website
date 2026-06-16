@@ -50,6 +50,7 @@ async function discoverLinks(page: Page, startUrl: string): Promise<string[]> {
       .filter(Boolean),
   );
   const seen = new Set<string>();
+  const familySeen = new Set<string>();
   const ranked: { url: string; score: number }[] = [];
   for (const raw of hrefs) {
     let u: URL;
@@ -66,8 +67,20 @@ async function discoverLinks(page: Page, startUrl: string): Promise<string[]> {
     if (/\.(pdf|zip|png|jpg|jpeg|svg|webp|mp4|gif)$/i.test(u.pathname)) continue;
     seen.add(clean);
     const path = u.pathname.toLowerCase();
+    const family =
+      path.includes("contact") ? "contact" :
+      path.includes("customers") || path.includes("case-studies") ? "customers" :
+      path.includes("pricing") ? "pricing" :
+      path.includes("docs") || path.includes("documentation") ? "docs" :
+      path.includes("blog") || path.includes("changelog") ? "content" :
+      path.split("/").filter(Boolean)[0] ?? path;
+    if (familySeen.has(family) && /contact|about|careers|jobs|content|customers/.test(family)) continue;
+    familySeen.add(family);
     const hintIdx = TARGET_PAGE_HINTS.findIndex((h) => path.includes(h));
-    const score = hintIdx >= 0 ? 100 - hintIdx : 0;
+    let score = hintIdx >= 0 ? 140 - hintIdx * 5 : 10;
+    if (/\/(intake|plan|build|diffs|monitor|agents?|asks|customer-requests|insights|mobile|integrations|method|product|products|features|platform|solutions|use-cases)\b/i.test(path)) score += 170;
+    if (/\/(pricing|customers|case-studies|docs|documentation|changelog)\b/i.test(path)) score += 40;
+    if (/\/(contact|careers|jobs|about)\b/i.test(path)) score -= 20;
     ranked.push({ url: clean, score });
   }
   ranked.sort((a, b) => b.score - a.score);
@@ -93,6 +106,8 @@ function toPageExtract(
     wpColors: base.wpColors,
     sectionFingerprints: base.sectionFingerprints,
     components: base.components,
+    assets: base.assets as PageExtract["assets"],
+    content: base.content as PageExtract["content"],
     responsive,
     stylesheetHrefs: base.stylesheetHrefs,
     inlineStyles: base.inlineStyles,

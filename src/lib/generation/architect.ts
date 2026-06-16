@@ -1,7 +1,37 @@
 import type { DesignDna } from "@/lib/dna/schema";
 import type { DesignSystem } from "@/lib/designsystem/schema";
+import type { BrandContext } from "@/lib/brand/schema";
+import { isUsableAssetUrl } from "@/lib/brand/assets";
 import { structured, aiFeatures } from "@/lib/ai/claude";
 import { PageArchitectureSchema, type GenerationRequest, type PageArchitecture } from "./schema";
+
+// Section type -> preferred asset roles (for media-bearing layouts).
+const ASSET_ROLE_PREF: Record<string, string[]> = {
+  hero: ["dashboard", "product-shot", "hero-image", "illustration"],
+  "split-hero": ["dashboard", "product-shot", "hero-image", "illustration"],
+  "feature-grid": ["feature-image", "illustration", "product-shot"],
+  "service-grid": ["feature-image", "illustration"],
+  "team-section": ["team-photo", "testimonial-avatar"],
+  testimonials: ["testimonial-avatar"],
+  "logo-cloud": ["logo"],
+  pricing: ["illustration", "feature-image"],
+  stats: ["illustration"],
+  "content-block": ["product-shot", "illustration", "feature-image"],
+  "case-studies": ["product-shot", "feature-image"],
+  portfolio: ["product-shot", "feature-image"],
+};
+
+function pickAsset(sectionType: string, brand?: BrandContext): { role: string; url?: string } {
+  const prefs = ASSET_ROLE_PREF[sectionType] ?? ["product-shot", "illustration"];
+  if (!brand) return { role: `${prefs[0]}` };
+  for (const role of prefs) {
+    const a = brand.assets.find((x) => x.role === role && isUsableAssetUrl(x.url));
+    if (a) return { role, url: a.url };
+  }
+  // any real raster asset as last resort
+  const any = brand.assets.find((x) => isUsableAssetUrl(x.url) && x.role !== "logo");
+  return { role: prefs[0], url: any?.url };
+}
 
 /**
  * Phase 9 — LAYOUT-DRIVEN page architecture. Every section MUST originate from
@@ -99,19 +129,29 @@ function resolveToLayout(requested: string, system: DesignSystem): ResolvedLayou
   return { type: "content-block", variant: "stacked", sourcePattern: `no detected layouts; content-block for "${requested}"` };
 }
 
-function deterministicArchitecture(req: GenerationRequest, system: DesignSystem): PageArchitecture {
+function deterministicArchitecture(req: GenerationRequest, system: DesignSystem, brand?: BrandContext): PageArchitecture {
   const wanted = req.sections.length ? req.sections : DEFAULT_SECTIONS[req.pageType] ?? DEFAULT_SECTIONS.custom;
-  const product = req.title ?? "the product";
+  const product = req.title ?? brand?.products[0] ?? "the product";
+  const cta = brand?.ctaPatterns[0] ?? "standard-cta";
+  const copyPattern = brand?.brandVoice.conversionStyle ?? "product-led";
 
   const sections = wanted.map((w) => {
     const r = resolveToLayout(w, system);
+    const layoutDef = system.layouts.find((l) => l.type === r.type);
+    const needsMedia = r.variant === "split" || r.variant === "media" || r.variant === "logos" || layoutDef?.hasMedia;
+    const asset = needsMedia ? pickAsset(r.type, brand) : undefined;
     return {
       type: r.type,
       sourcePattern: r.sourcePattern,
-      heading: headingFor(w, req),
+      heading: brandHeadingFor(w, req, brand),
       subheading: subFor(w, req),
       contentSlots: {},
       layout: r.variant,
+      visualAsset: asset?.role,
+      visualAssetUrl: asset?.url,
+      copyPattern,
+      componentPattern: cta,
+      sectionPattern: brand?.sectionPatterns.find((p) => p.startsWith(r.type)) ?? r.type,
       notes: `Instantiates detected ${r.type} layout (${r.variant}).`,
     };
   });
@@ -120,8 +160,16 @@ function deterministicArchitecture(req: GenerationRequest, system: DesignSystem)
     pageTitle: req.title ?? `${titleCase(req.pageType)} — ${product}`,
     metaDescription: (req.brief || `${titleCase(req.pageType)} page`).slice(0, 155),
     sections,
-    rationale: "Each section instantiates a layout detected in the source product; no generic templates.",
+    rationale: "Each section instantiates a detected layout and reuses the brand's real assets, copy and voice.",
   });
+}
+
+/** Prefer a real harvested headline matching the section before a synthetic one. */
+function brandHeadingFor(type: string, req: GenerationRequest, brand?: BrandContext): string {
+  if (brand && (type === "hero" || type === "split-hero") && brand.headlines.length && !req.brief) {
+    return brand.headlines[0];
+  }
+  return headingFor(type, req);
 }
 
 function headingFor(type: string, req: GenerationRequest): string {
@@ -137,17 +185,18 @@ function headingFor(type: string, req: GenerationRequest): string {
     stats: "By the numbers",
     logos: "Trusted by",
     story: "Our story",
-    cta: `Get started${p ? ` with ${p}` : ""}`,
-    contact: "Get in touch",
-    form: "Get in touch",
+    cta: p ? `Start building with ${p}` : "Start building today",
+    "footer-cta": p ? `Ready to try ${p}?` : "Ready when you are",
+    contact: "Talk to the team",
+    form: "Talk to the team",
     footer: "",
     timeline: "How we got here",
   };
   return map[type] ?? titleCase(type);
 }
 function subFor(type: string, req: GenerationRequest): string {
-  if (type === "hero" || type === "split-hero") return req.brief.slice(0, 160) || `Welcome to the ${req.pageType} page.`;
-  if (type === "cta") return "Join thousands already on board.";
+  if (type === "hero" || type === "split-hero") return req.brief.slice(0, 160) || `A closer look at ${req.title ?? "the product"}.`;
+  if (type === "cta" || type === "footer-cta") return "Set up your workspace in minutes.";
   return "";
 }
 function titleCase(s: string): string {
@@ -166,8 +215,9 @@ export async function architectPage(
   req: GenerationRequest,
   dna: DesignDna,
   system: DesignSystem,
+  brand?: BrandContext,
 ): Promise<PageArchitecture> {
-  const fallback = deterministicArchitecture(req, system);
+  const fallback = deterministicArchitecture(req, system, brand);
   if (!aiFeatures.ai) return fallback;
 
   const prompt = `Plan a "${req.pageType}" page by INSTANTIATING this product's detected layouts.
@@ -183,20 +233,40 @@ ${JSON.stringify(system.layouts.map((l) => ({ type: l.type, variant: l.variant, 
 ${JSON.stringify(system.components.map((c) => ({ type: c.type, className: c.className, fingerprint: c.fingerprint })))}
 === BRAND ===
 ${dna.designPhilosophy.summary} | ${dna.designPhilosophy.keywords.join(", ")}
+${brand ? `=== BRAND VOICE === ${JSON.stringify(brand.brandVoice)}
+=== REAL HEADLINES (reuse / echo this voice) === ${JSON.stringify(brand.headlines.slice(0, 12))}
+=== REAL CTA LABELS === ${JSON.stringify(brand.ctaPatterns)}
+=== AVAILABLE ASSETS (role → use for media sections) === ${JSON.stringify(brand.assets.slice(0, 20).map((a) => ({ role: a.role, url: a.url })))}
+=== FORBIDDEN GENERIC PHRASES (never use) === ${JSON.stringify(brand.forbiddenPhrases)}` : ""}
 
-Map each requested section to the CLOSEST detected layout type and set its variant. Return full PageArchitecture JSON; contentSlots maps slot name -> real copy.`;
+For each section set: visualAsset (asset role for media layouts), visualAssetUrl (a real asset URL when available), copyPattern (${brand?.brandVoice.conversionStyle ?? "product-led"}), componentPattern (${brand?.ctaPatterns[0] ?? "standard-cta"}), sectionPattern.
+Match the brand voice; reuse real headline/CTA vocabulary. Map each requested section to the CLOSEST detected layout type and set its variant. Return full PageArchitecture JSON; contentSlots maps slot name -> real copy.`;
 
   try {
     const arch = await structured(PageArchitectureSchema, prompt, { system: SYSTEM, maxTokens: 6000, temperature: 0.4 });
     // Enforce requirement 2/3: coerce any hallucinated type back to a detected layout.
     const valid = new Set(system.layouts.map((l) => l.type));
     arch.sections = arch.sections.map((s) => {
+      let sec = s;
       if (valid.has(s.type)) {
         const l = system.layouts.find((x) => x.type === s.type)!;
-        return { ...s, layout: s.layout || l.variant };
+        sec = { ...s, layout: s.layout || l.variant };
+      } else {
+        const r = resolveToLayout(s.type, system);
+        sec = { ...s, type: r.type, layout: r.variant, sourcePattern: r.sourcePattern };
       }
-      const r = resolveToLayout(s.type, system);
-      return { ...s, type: r.type, layout: r.variant, sourcePattern: r.sourcePattern };
+      // Backfill brand fields: media sections MUST resolve to a real asset.
+      const layoutDef = system.layouts.find((l) => l.type === sec.type);
+      const needsMedia = sec.layout === "split" || sec.layout === "media" || sec.layout === "logos" || layoutDef?.hasMedia;
+      if (needsMedia && !isUsableAssetUrl(sec.visualAssetUrl)) {
+        const a = pickAsset(sec.type, brand);
+        sec = { ...sec, visualAsset: sec.visualAsset ?? a.role, visualAssetUrl: a.url };
+      }
+      return {
+        ...sec,
+        copyPattern: sec.copyPattern ?? brand?.brandVoice.conversionStyle,
+        componentPattern: sec.componentPattern ?? brand?.ctaPatterns[0],
+      };
     });
     return arch;
   } catch {

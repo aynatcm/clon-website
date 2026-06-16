@@ -20,6 +20,7 @@ export function buildDesignSystem(dna: DesignDna): { system: DesignSystem; css: 
     });
   };
   pick("primary", dna.colors.primary);
+  pick("secondary", dna.colors.secondary);
   pick("accent", dna.colors.accent);
   pick("cta", dna.colors.cta);
   pick("surface", dedupe(dna.colors.surfaces));
@@ -264,6 +265,7 @@ function renderCss(system: DesignSystem, dna: DesignDna): string {
   const radius = t.radii["base"];
   const shadow = t.shadows["base"] ?? "none";
   const ctaColor = t.colors["cta"] ?? t.colors["primary"] ?? t.colors["accent"];
+  const decorColor = t.colors["secondary"] ?? t.colors["accent"] ?? t.colors["border"] ?? t.colors["primary"] ?? ctaColor;
   const maxW = t.containers["max"];
 
   // --- apply MEASURED component fingerprints (requirement 7) ---
@@ -279,10 +281,12 @@ function renderCss(system: DesignSystem, dna: DesignDna): string {
   const btnShadow = btn?.shadow ?? "none";
 
   const cardRadius = card?.radius && card.radius !== "0px" ? card.radius : radius === "9999px" ? "16px" : radius;
-  const cardPad = card?.padding && /\d/.test(card.padding) ? card.padding : "clamp(1.25rem, 3vw, 2rem)";
+  const cardPad = hasMeaningfulPadding(card?.padding) ? card!.padding! : "clamp(1.25rem, 3vw, 2rem)";
   const cardBorder = card?.border ?? `1px solid ${t.colors["border"] ?? "rgba(0,0,0,0.08)"}`;
   const cardShadow = card?.shadow ?? shadow;
-  const cardBg = card?.background && card.background !== "rgba(0, 0, 0, 0)" ? card.background : t.colors["surface"] ?? bg;
+  const surfaceToken = t.colors["surface"] ?? bg;
+  const safeSurface = dna.colors.mode === "dark" && colorLuminance(surfaceToken) > 0.42 ? "color-mix(in srgb, var(--color-text,#fff) 7%, var(--color-background,#08090a))" : surfaceToken;
+  const cardBg = card?.background && card.background !== "rgba(0, 0, 0, 0)" ? card.background : safeSurface;
 
   const inputRadius = inputFp?.radius && inputFp.radius !== "0px" ? inputFp.radius : radius;
   const inputBorder = inputFp?.border ?? `1px solid ${t.colors["border"] ?? "#ccc"}`;
@@ -352,46 +356,51 @@ img { max-width: 100%; display: block; }
 /* Split layout: content area + visual area (preserves 2-column structure). */
 .dna-split { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(2rem, 5vw, 4rem); align-items: center; }
 .dna-split__content { min-width: 0; }
+.dna-media-stack { display: grid; gap: clamp(1.5rem, 4vw, 3rem); }
+.dna-media-stack__content { max-width: 760px; }
+.dna-media-stack .dna-media { min-height: clamp(360px, 48vw, 680px); }
 .dna-media {
   border-radius: ${cardRadius}; box-shadow: ${cardShadow};
   background: ${cardBg};
   min-height: 320px; width: 100%; overflow: hidden;
   border: 1px solid var(--color-border, rgba(127,127,127,.2));
-  background-image: linear-gradient(135deg, ${ctaColor}1a, transparent 70%);
+  background-image: linear-gradient(135deg, ${decorColor}1a, transparent 70%);
   display: flex;
 }
+.dna-media--asset { padding: clamp(.75rem, 2vw, 1.25rem); align-items: center; justify-content: center; }
+.dna-media__img { width: 100%; height: 100%; object-fit: cover; object-position: top center; display: block; border-radius: inherit; }
 /* Inline visual artifact (dashboard / chart / code / UI panel) — fills media. */
 .dna-mock { display: flex; flex-direction: column; width: 100%; font-family: ${body}; }
 .dna-mock__bar { display: flex; align-items: center; gap: .5rem; padding: .6rem .8rem; border-bottom: 1px solid var(--color-border, rgba(127,127,127,.2)); }
 .dna-mock__bar small { font-size: .72rem; opacity: .6; }
 .dna-mock__dots { display: inline-flex; gap: 5px; }
 .dna-mock__dots i { width: 9px; height: 9px; border-radius: 50%; background: var(--color-border, #999); opacity: .7; }
-.dna-mock__dots i:first-child { background: ${ctaColor}; opacity: .9; }
+.dna-mock__dots i:first-child { background: ${decorColor}; opacity: .9; }
 .dna-mock__body { display: flex; flex: 1; }
 .dna-mock__side { width: 22%; padding: .8rem .6rem; display: flex; flex-direction: column; gap: .5rem; border-right: 1px solid var(--color-border, rgba(127,127,127,.2)); }
 .dna-mock__side span { height: 8px; border-radius: 4px; background: var(--color-border, #999); opacity: .5; }
-.dna-mock__side span:first-child { background: ${ctaColor}; opacity: .85; width: 70%; }
+.dna-mock__side span:first-child { background: ${decorColor}; opacity: .85; width: 70%; }
 .dna-mock__main { flex: 1; padding: .9rem; display: flex; flex-direction: column; gap: .9rem; }
 .dna-mock__stats { display: grid; grid-template-columns: repeat(3,1fr); gap: .6rem; }
-.dna-mock__stats div { height: 38px; border-radius: 8px; background: ${ctaColor}1f; border: 1px solid ${ctaColor}40; }
+.dna-mock__stats div { height: 38px; border-radius: 8px; background: ${decorColor}1f; border: 1px solid ${decorColor}40; }
 .dna-mock__chart { display: flex; align-items: flex-end; gap: 8px; height: 120px; }
-.dna-mock__chart span { flex: 1; border-radius: 4px 4px 0 0; background: ${ctaColor}; opacity: .85; }
+.dna-mock__chart span { flex: 1; border-radius: 4px 4px 0 0; background: ${decorColor}; opacity: .85; }
 .dna-mock__chart span:nth-child(even) { opacity: .5; }
 .dna-mock__chartarea { flex: 1; padding: .5rem; }
 .dna-mock__chartarea svg { width: 100%; height: 100%; }
-.dna-mock__line { fill: none; stroke: ${ctaColor}; stroke-width: 2.5; }
-.dna-mock__area { fill: ${ctaColor}26; stroke: none; }
+.dna-mock__line { fill: none; stroke: ${decorColor}; stroke-width: 2.5; }
+.dna-mock__area { fill: ${decorColor}26; stroke: none; }
 .dna-mock__code { margin: 0; padding: .9rem 1rem; font-family: ${t.fonts["mono"] ?? "ui-monospace, monospace"}; font-size: .8rem; line-height: 1.7; display: flex; flex-direction: column; }
 .dna-mock__codeline { white-space: pre; }
-.dna-mock__code .t-kw { color: ${ctaColor}; font-style: normal; }
-.dna-mock__code .t-fn { color: ${t.colors["accent"] ?? ctaColor}; font-style: normal; }
+.dna-mock__code .t-kw { color: ${decorColor}; font-style: normal; }
+.dna-mock__code .t-fn { color: ${t.colors["accent"] ?? decorColor}; font-style: normal; }
 .dna-mock__code .t-op { opacity: .6; font-style: normal; }
 .dna-mock__code .t-tx { font-style: normal; opacity: .85; }
 .dna-mock__list { padding: .8rem; display: flex; flex-direction: column; gap: .7rem; }
 .dna-mock__row { display: flex; align-items: center; gap: .7rem; }
-.dna-mock__avatar { width: 28px; height: 28px; border-radius: 50%; background: ${ctaColor}; opacity: .8; flex: none; }
+.dna-mock__avatar { width: 28px; height: 28px; border-radius: 50%; background: ${decorColor}; opacity: .8; flex: none; }
 .dna-mock__line2 { flex: 1; height: 8px; border-radius: 4px; background: var(--color-border, #999); opacity: .5; }
-.dna-mock__pill { width: 46px; height: 18px; border-radius: 999px; background: ${ctaColor}33; border: 1px solid ${ctaColor}55; flex: none; }
+.dna-mock__pill { width: 46px; height: 18px; border-radius: 999px; background: ${decorColor}33; border: 1px solid ${decorColor}55; flex: none; }
 .dna-logos { display: flex; flex-wrap: wrap; gap: clamp(1.5rem, 4vw, 3rem); align-items: center; justify-content: center; opacity: .8; }
 .dna-logos__item { height: 32px; display: flex; align-items: center; font-weight: 600; opacity: .7; }
 @media (max-width: 900px) {
@@ -412,4 +421,29 @@ function pickContrast(hex?: string): string {
   const b = parseInt(hex.slice(5, 7), 16);
   const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
   return lum > 0.6 ? "#0a0a0a" : "#ffffff";
+}
+
+function colorLuminance(color?: string): number {
+  if (!color) return 0;
+  const hex = color.trim();
+  if (hex.startsWith("#") && hex.length >= 7) {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  }
+  const m = hex.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+  if (m) {
+    const r = Number(m[1]);
+    const g = Number(m[2]);
+    const b = Number(m[3]);
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  }
+  return 0;
+}
+
+function hasMeaningfulPadding(padding?: string): boolean {
+  if (!padding || !/\d/.test(padding)) return false;
+  const values = padding.match(/-?\d*\.?\d+/g)?.map(Number) ?? [];
+  return values.some((v) => v >= 8);
 }
